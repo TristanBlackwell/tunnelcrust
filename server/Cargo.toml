@@ -6,7 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures = "0.3.30"
 http-body-util = "0.1.2"
 hyper = { version = "1.4.1", features = ["full"] }
+hyper-tungstenite = "0.15.0"
 hyper-util = { version = "0.1.8", features = ["full"] }
 tokio = { version = "1.40.0", features = ["full"] }
