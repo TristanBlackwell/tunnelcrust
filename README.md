@@ -1,6 +1,18 @@
-# Tunnelcrust
+<div align="center">
+  <picture>
+    <source srcset="./docs/images/logo.png">
+    <img alt="Tunnelcrust logo" src="./docs/images/logo.png" width="40%">
+  </picture>
+</div>
 
+<br></br>
+
+<h1 align="center">Tunnelcrust</h1>
+<div align="center">
 A tunneling application designed to route traffic without exposing inbound ports.
+</div>
+</br>
+
 
 > [!WARNING]
 > Tunnelcrust is **not** a production-ready application. I am not a network specialist or Rust expert in anyway. This is merely a hobby project to enhance both my Rust & networking knowledge.
