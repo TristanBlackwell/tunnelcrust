@@ -83,50 +83,57 @@ async fn handle_request(
         ),
     );
 
-    if is_upgrade_request(&request) {
-        event!(Level::INFO, "Client requested an upgrade");
+    match (request.method(), request.uri().path()) {
+        (&hyper::Method::GET, "/health-check") => {
+            return Ok(Response::new(Full::from("Alive and kickin!")))
+        }
+        _ => {
+            if is_upgrade_request(&request) {
+                event!(Level::INFO, "Client requested an upgrade");
 
-        match upgrade(&mut request, None) {
-            Ok((response, websocket)) => {
+                match upgrade(&mut request, None) {
+                    Ok((response, websocket)) => {
+                        event!(
+                            Level::INFO,
+                            "Client request upgraded. Passing to websocket handler to establish connection"
+                        );
+
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_websocket(websocket).await {
+                                event!(
+                                    Level::ERROR,
+                                    "Failure during websocket connection: {:?}",
+                                    err
+                                );
+                            }
+                        });
+
+                        Ok(response)
+                    }
+                    Err(err) => {
+                        event!(Level::ERROR, "Failed to upgrade client request: {:?}", err);
+                        event!(Level::ERROR, "Dropping client request");
+
+                        return Ok(Response::builder()
+                            .status(500)
+                            .body(Full::from("Failed to upgrade request"))
+                            .unwrap());
+                    }
+                }
+            } else {
                 event!(
                     Level::INFO,
-                    "Client request upgraded. Passing to websocket handler to establish connection"
+                    "Client sent a standard HTTP request. Sending back 426 upgrade response"
                 );
-
-                tokio::spawn(async move {
-                    if let Err(err) = handle_websocket(websocket).await {
-                        event!(
-                            Level::ERROR,
-                            "Failure during websocket connection: {:?}",
-                            err
-                        );
-                    }
-                });
-
-                Ok(response)
-            }
-            Err(err) => {
-                event!(Level::ERROR, "Failed to upgrade client request: {:?}", err);
-                event!(Level::ERROR, "Dropping client request");
-
-                return Ok(Response::builder()
-                    .status(500)
-                    .body(Full::from("Failed to upgrade request"))
-                    .unwrap());
+                // Inform the client we're expecting upgrade requests here
+                Ok(Response::builder()
+                    .status(426)
+                    .header("Connection", "upgrade")
+                    .header("Upgrade", "websocket")
+                    .body(Full::from("Upgrade required"))
+                    .unwrap_or(Response::new(Full::from("Unsupported request"))))
             }
         }
-    } else {
-        event!(
-            Level::INFO,
-            "Client sent a standard HTTP request. Sending back 426 upgrade response"
-        );
-        // Inform the client we're expecting upgrade requests here
-        Ok(Response::builder()
-            .status(426)
-            .header("Connection", "upgrade")
-            .header("Upgrade", "websocket")
-            .body(Full::from("Upgrade required"))
-            .unwrap_or(Response::new(Full::from("Unsupported request"))))
     }
 }
 
@@ -184,4 +191,58 @@ async fn handle_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+#[tokio::test]
+async fn health_check_works() {
+    let server = Server::build().await.expect("Failed to build server");
+    let port = server.port;
+
+    // Spawn the server on a background task
+    tokio::spawn(async move {
+        server.run().await;
+    });
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&format!("http://127.0.0.1:{}/health-check", port))
+        .send()
+        .await
+        .expect("Failed to execute request");
+
+    assert!(response.status().is_success());
+
+    let text = response
+        .text()
+        .await
+        .expect("Failed to read text from response");
+
+    assert_eq!(text, "Alive and kickin!");
+}
+
+#[tokio::test]
+async fn requests_upgrade() {
+    let server = Server::build().await.expect("Failed to build server");
+    let port = server.port;
+
+    // Spawn the server on a background task
+    tokio::spawn(async move {
+        server.run().await;
+    });
+
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&format!("http://127.0.0.1:{}", port))
+        .send()
+        .await
+        .expect("Failed to execute request");
+
+    assert_eq!(response.status().as_u16(), 426);
+
+    let headers = response.headers();
+
+    assert_eq!(headers.get("Connection").unwrap(), "upgrade");
+    assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
 }
