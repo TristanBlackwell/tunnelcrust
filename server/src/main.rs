@@ -12,10 +12,16 @@ use http_body_util::Full;
 use hyper::{body::Bytes, Request, Response};
 use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, HyperWebsocket};
 use hyper_util::rt::TokioIo;
+use server::telemetry::{get_subscriber, init_subscriber};
 use tokio::net::TcpListener;
+use tracing::{event, instrument, Level};
 
 #[tokio::main]
 async fn main() {
+    // Setup and initialise the logger
+    let subscriber = get_subscriber(String::from("tunnelcrust-server"), String::from("info"));
+    init_subscriber(subscriber);
+
     let listener = TcpListener::bind("0.0.0.0:0")
         .await
         .expect("Unable to bind to a random port");
@@ -24,7 +30,7 @@ async fn main() {
         .expect("Unable to determine local address")
         .port();
 
-    println!("Listening on http://0.0.0.0:{}", port);
+    tracing::info!("Listening on http://0.0.0.0:{}", port);
 
     let mut http = hyper::server::conn::http1::Builder::new();
     http.keep_alive(true);
@@ -34,7 +40,7 @@ async fn main() {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 // TODO: validate the client is authorised to connect.
-                println!("New incoming client request - {:?}", addr);
+                tracing::info!("New incoming client request - {:?}", addr);
 
                 // our request handler service will upgrade the Websocket connection
                 // (spawning a new thread) or signal that the client should do so.
@@ -49,38 +55,48 @@ async fn main() {
 
                 tokio::spawn(async move {
                     if let Err(err) = connection.await {
-                        eprintln!("Failed to respond to client - {:?}: {:?}", addr, err);
+                        tracing::error!("Failed to respond to client - {:?}: {:?}", addr, err);
                     } else {
-                        println!("Response sent to client - {:?}", addr)
+                        tracing::info!("Response sent to client - {:?}", addr)
                     }
                 });
             }
-            Err(err) => eprintln!("Failed to accept client request attempt: {:?}", err),
+            Err(err) => tracing::error!("Failed to accept client request attempt: {:?}", err),
         }
     }
 }
 
+#[instrument(name = "handle_request", skip(request), fields(client = tracing::field::Empty))]
 async fn handle_request(
     mut request: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, Error> {
+    tracing::Span::current().record(
+        "client",
+        &tracing::field::display(
+            &request
+                .headers()
+                .get("host")
+                .unwrap()
+                .to_str()
+                .unwrap_or("unknown"),
+        ),
+    );
+
     if is_upgrade_request(&request) {
-        println!(
-            "Client requested an upgrade - {:?}",
-            request.headers().get("host")
-        );
+        event!(Level::INFO, "Client requested an upgrade");
 
         match upgrade(&mut request, None) {
             Ok((response, websocket)) => {
-                println!(
-                    "Client request upgraded. Passing to websocket handler to establish connection  - {:?}",
-                    request.headers().get("host")
+                event!(
+                    Level::INFO,
+                    "Client request upgraded. Passing to websocket handler to establish connection"
                 );
 
                 tokio::spawn(async move {
-                    if let Err(err) = serve_websocket(websocket).await {
-                        eprintln!(
-                            "Failure during websocket connection - {:?}: {:?}",
-                            request.headers().get("host"),
+                    if let Err(err) = handle_websocket(websocket).await {
+                        event!(
+                            Level::ERROR,
+                            "Failure during websocket connection: {:?}",
                             err
                         );
                     }
@@ -89,15 +105,8 @@ async fn handle_request(
                 Ok(response)
             }
             Err(err) => {
-                eprintln!(
-                    "Failed to upgrade client request - {:?}: {:?}",
-                    request.headers().get("host"),
-                    err
-                );
-                eprintln!(
-                    "Dropping client request - {:?}",
-                    request.headers().get("host")
-                );
+                event!(Level::ERROR, "Failed to upgrade client request: {:?}", err);
+                event!(Level::ERROR, "Dropping client request");
 
                 return Ok(Response::builder()
                     .status(500)
@@ -106,6 +115,10 @@ async fn handle_request(
             }
         }
     } else {
+        event!(
+            Level::INFO,
+            "Client sent a standard HTTP request. Sending back 426 upgrade response"
+        );
         // Inform the client we're expecting upgrade requests here
         Ok(Response::builder()
             .status(426)
@@ -118,9 +131,14 @@ async fn handle_request(
 
 type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-async fn serve_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
+#[instrument(name = "handle_websocket", skip(websocket))]
+async fn handle_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
     match websocket.await {
         Ok(mut websocket) => {
+            event!(
+                Level::INFO,
+                "Websocket connection established. Awaiting messages from the client"
+            );
             while let Some(message) = websocket.next().await {
                 match message? {
                     Message::Text(msg) => {
@@ -160,7 +178,7 @@ async fn serve_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
             }
         }
         Err(err) => {
-            eprintln!("Failed to establish websocket connection. Has the upgrade response been sent to the client?: {:?}", err);
+            event!(Level::ERROR, "Failed to establish websocket connection. Has the upgrade response been sent to the client?: {:?}", err);
         }
     }
 
