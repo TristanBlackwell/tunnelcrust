@@ -28,4 +28,4 @@ This repository is a cargo workspace with two packages:
 
 The [devcontainer](./devcontainer) can be used to replicate the intended dev environment. Documentation on devcontainers can be found on [VS Code](https://code.visualstudio.com/docs/devcontainers/containers). This also contains a set of extensions (if using VS Code) to assist with development.
 
-- [Rust](https://www.rust-lang.org/tools/install) - 1.79.0 
+- [Rust](https://www.rust-lang.org/tools/install) - 1.79.0
