@@ -1,15 +1,24 @@
+use std::{collections::HashMap, sync::Arc};
+
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use http_body_util::Full;
-use hyper::{body::Bytes, Request, Response};
-use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, HyperWebsocket};
+use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
+use hyper_tungstenite::{
+    is_upgrade_request, tungstenite::Message, upgrade, HyperWebsocket, WebSocketStream,
+};
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{event, instrument, Level};
+use uuid::Uuid;
+
+type SharedConnections = Arc<Mutex<HashMap<Uuid, Arc<Mutex<WebSocketStream<TokioIo<Upgraded>>>>>>>;
 
 pub struct Server {
     port: u16,
     listener: TcpListener,
+    // A HashMap of active websocket connections
+    connections: SharedConnections,
 }
 
 impl Server {
@@ -24,7 +33,11 @@ impl Server {
             .expect("Unable to determine local address")
             .port();
 
-        Ok(Self { port, listener })
+        Ok(Self {
+            port,
+            listener,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// Start accepting connections on the servers port. This will run until
@@ -42,6 +55,8 @@ impl Server {
                     // TODO: validate the client is authorised to connect.
                     tracing::info!("New incoming client request - {:?}", addr);
 
+                    let connections = self.connections.clone();
+
                     // our request handler service will upgrade the Websocket connection
                     // (spawning a new thread) or signal that the client should do so.
                     // Either way the responses for this will pass through to the block
@@ -49,7 +64,9 @@ impl Server {
                     let connection = http
                         .serve_connection(
                             TokioIo::new(stream),
-                            hyper::service::service_fn(handle_request),
+                            hyper::service::service_fn(move |req| {
+                                handle_request(req, connections.clone())
+                            }),
                         )
                         .with_upgrades();
 
@@ -67,9 +84,10 @@ impl Server {
     }
 }
 
-#[instrument(name = "handle_request", skip(request), fields(client = tracing::field::Empty))]
+#[instrument(name = "handle_request", skip(request, connections), fields(client = tracing::field::Empty))]
 async fn handle_request(
     mut request: Request<hyper::body::Incoming>,
+    connections: SharedConnections,
 ) -> Result<Response<Full<Bytes>>, Error> {
     tracing::Span::current().record(
         "client",
@@ -99,7 +117,7 @@ async fn handle_request(
                         );
 
                         tokio::spawn(async move {
-                            if let Err(err) = handle_websocket(websocket).await {
+                            if let Err(err) = handle_websocket(websocket, connections).await {
                                 event!(
                                     Level::ERROR,
                                     "Failure during websocket connection: {:?}",
@@ -139,25 +157,45 @@ async fn handle_request(
 
 type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-#[instrument(name = "handle_websocket", skip(websocket))]
-async fn handle_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
+#[instrument(name = "handle_websocket", skip(websocket, connections))]
+async fn handle_websocket(
+    websocket: HyperWebsocket,
+    connections: SharedConnections,
+) -> Result<(), Error> {
     match websocket.await {
-        Ok(mut websocket) => {
-            event!(
-                Level::INFO,
-                "Websocket connection established. Awaiting messages from the client"
-            );
-            while let Some(message) = websocket.next().await {
+        Ok(websocket) => {
+            event!(Level::INFO, "Websocket connection established");
+
+            let client_id = Uuid::new_v4();
+            // We also wrap our websocket in a Arc / Mutex in case we decide to send messages
+            // from multiple threads.
+            let websocket = Arc::new(Mutex::new(websocket));
+
+            {
+                let mut connections = connections.lock().await;
+                connections.insert(client_id, websocket.clone());
+                event!(
+                    Level::INFO,
+                    "Websocket connection attached to active connections: {}",
+                    client_id
+                );
+            }
+
+            while let Some(message) = websocket.lock().await.next().await {
                 match message? {
                     Message::Text(msg) => {
                         println!("Received text message: {msg}");
                         websocket
+                            .lock()
+                            .await
                             .send(Message::text("Thank you, come again."))
                             .await?;
                     }
                     Message::Binary(msg) => {
                         println!("Received binary message: {msg:02X?}");
                         websocket
+                            .lock()
+                            .await
                             .send(Message::binary(b"Thank you, come again.".to_vec()))
                             .await?;
                     }
@@ -183,6 +221,16 @@ async fn handle_websocket(websocket: HyperWebsocket) -> Result<(), Error> {
                         unreachable!();
                     }
                 }
+            }
+
+            {
+                let mut connections = connections.lock().await;
+                connections.remove(&client_id);
+                event!(
+                    Level::INFO,
+                    "Websocket connection removed from active connections: {}",
+                    client_id
+                )
             }
         }
         Err(err) => {
