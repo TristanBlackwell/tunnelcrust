@@ -10,7 +10,7 @@ client --url http://localhost:3000
 use std::env;
 
 use clap::Parser;
-use futures_util::{future, pin_mut, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::io::AsyncReadExt;
 use tokio_tungstenite::{
     connect_async,
@@ -64,30 +64,55 @@ async fn main() {
 
     println!("Setting up a tunnel connection to '{}'...", address);
 
-    let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
+    let (stdin_tx, mut stdin_rx) = futures_channel::mpsc::unbounded();
     tokio::spawn(read_stdin(stdin_tx));
 
-    // Establish the WebSocket connection to the proxy server
+    // Establish the WebSocket connection to the proxy server.
     let (ws_stream, _) = connect_async(server_url).await.expect("Failed to connect");
     println!("WebSocket handshake has been successfully completed");
 
-    let (write, read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
-    let stdin_to_ws = stdin_rx.map(Ok).forward(write);
-    let ws_to_stdout = {
-        read.for_each(|message| async {
-            match message {
-                Ok(Message::Text(text)) => println!("Received text: {}", text),
-                Ok(Message::Close(frame)) => println!("Received close: {:#?}", frame),
-                Err(Error::ConnectionClosed) => println!("Connection was closed"),
-                Err(err) => eprintln!("Error: {}", err),
-                _ => println!("Unhandled message"),
+    loop {
+        tokio::select! {
+            // Incoming message
+            Some(message) = read.next() => {
+                match message {
+                    Ok(Message::Text(text)) => println!("Received text: {}", text),
+                    Ok(Message::Close(frame)) => {
+                        println!("Received close: {:#?}", frame);
+                        break;  // Exit the loop on close
+                    }
+                    Err(Error::ConnectionClosed) => {
+                        println!("Connection was closed");
+                        break;
+                    }
+                    Err(err) => eprintln!("Error: {}", err),
+                    _ => println!("Unhandled message"),
+                }
             }
-        })
-    };
+            // Outgoing message
+            Some(msg) = stdin_rx.next() => {
+                if let Err(e) = write.send(msg).await {
+                    eprintln!("Failed to send message to WebSocket: {}", e);
+                    break;
+                }
+            }
+            // Handle Ctrl+C interrupt
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                println!("Closing connection...");
 
-    pin_mut!(stdin_to_ws, ws_to_stdout);
-    future::select(stdin_to_ws, ws_to_stdout).await;
+                if let Err(e) = write.send(Message::Close(None)).await {
+                    eprintln!("Failed to send close message: {}", e);
+                }
+                break;  // Exit the loop after sending close message.
+            }
+        }
+    }
+
+    // TODO: ensure all tasks are stopped after WebSocket disconnect.
+    println!("Disconnected.");
 }
 
 // Our helper method which will read data from stdin and send it along the
