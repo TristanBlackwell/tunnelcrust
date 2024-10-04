@@ -5,7 +5,9 @@ use futures::stream::StreamExt;
 use http_body_util::Full;
 use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
 use hyper_tungstenite::{
-    is_upgrade_request, tungstenite::Message, upgrade, HyperWebsocket, WebSocketStream,
+    is_upgrade_request, tungstenite::error::ProtocolError, tungstenite::Error::AlreadyClosed,
+    tungstenite::Error::ConnectionClosed, tungstenite::Error::Protocol, tungstenite::Message,
+    upgrade, HyperWebsocket, WebSocketStream,
 };
 use hyper_util::rt::TokioIo;
 use tokio::{net::TcpListener, sync::Mutex};
@@ -181,45 +183,64 @@ async fn handle_websocket(
                 );
             }
 
-            while let Some(message) = websocket.lock().await.next().await {
-                match message? {
-                    Message::Text(msg) => {
-                        println!("Received text message: {msg}");
-                        websocket
-                            .lock()
-                            .await
-                            .send(Message::text("Thank you, come again."))
-                            .await?;
-                    }
-                    Message::Binary(msg) => {
-                        println!("Received binary message: {msg:02X?}");
-                        websocket
-                            .lock()
-                            .await
-                            .send(Message::binary(b"Thank you, come again.".to_vec()))
-                            .await?;
-                    }
-                    Message::Ping(msg) => {
-                        // No need to send a reply: tungstenite takes care of this for you.
-                        println!("Received ping message: {msg:02X?}");
-                    }
-                    Message::Pong(msg) => {
-                        println!("Received pong message: {msg:02X?}");
-                    }
-                    Message::Close(msg) => {
-                        // No need to send a reply: tungstenite takes care of this for you.
-                        if let Some(msg) = &msg {
-                            println!(
-                                "Received close message with code {} and message: {}",
-                                msg.code, msg.reason
-                            );
-                        } else {
-                            println!("Received close message");
+            while let Some(ws_message) = websocket.lock().await.next().await {
+                match ws_message {
+                    Ok(message) => {
+                        match message {
+                            Message::Text(msg) => {
+                                println!("Received text message: {msg}");
+                                websocket
+                                    .lock()
+                                    .await
+                                    .send(Message::text("Thank you, come again."))
+                                    .await?;
+                            }
+                            Message::Binary(msg) => {
+                                println!("Received binary message: {msg:02X?}");
+                                websocket
+                                    .lock()
+                                    .await
+                                    .send(Message::binary(b"Thank you, come again.".to_vec()))
+                                    .await?;
+                            }
+                            Message::Ping(msg) => {
+                                // No need to send a reply: tungstenite takes care of this for you.
+                                println!("Received ping message: {msg:02X?}");
+                            }
+                            Message::Pong(msg) => {
+                                println!("Received pong message: {msg:02X?}");
+                            }
+                            Message::Close(msg) => {
+                                // No need to send a reply: tungstenite takes care of this for you.
+                                if let Some(msg) = &msg {
+                                    println!(
+                                        "Received close message with code {} and message: {}",
+                                        msg.code, msg.reason
+                                    );
+                                } else {
+                                    println!("Received close message");
+                                }
+                            }
+                            Message::Frame(_msg) => {
+                                unreachable!();
+                            }
                         }
                     }
-                    Message::Frame(_msg) => {
-                        unreachable!();
-                    }
+                    Err(err) => match err {
+                        ConnectionClosed => {
+                            event!(Level::INFO, "WebSocket close handshake complete");
+                        }
+                        AlreadyClosed => {
+                            event!(Level::WARN, "Websocket connection was already closed")
+                        }
+                        Protocol(protocol_err) => match protocol_err {
+                            ProtocolError::ResetWithoutClosingHandshake => {
+                                event!(Level::WARN, "Websocket closed without completing handshake")
+                            }
+                            _ => event!(Level::ERROR, "Websocket protocol error"),
+                        },
+                        err => event!(Level::ERROR, "Websocket error during connection: {}", err),
+                    },
                 }
             }
 
