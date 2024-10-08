@@ -1,7 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use futures::sink::SinkExt;
+use futures::stream::SplitSink;
+use futures::stream::SplitStream;
 use futures::stream::StreamExt;
+use futures::SinkExt;
 use http_body_util::Full;
 use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
 use hyper_tungstenite::{
@@ -10,11 +12,21 @@ use hyper_tungstenite::{
     upgrade, HyperWebsocket, WebSocketStream,
 };
 use hyper_util::rt::TokioIo;
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::TcpListener, spawn, sync::Mutex, time::sleep};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
-type SharedConnections = Arc<Mutex<HashMap<Uuid, Arc<Mutex<WebSocketStream<TokioIo<Upgraded>>>>>>>;
+type SharedConnections = Arc<
+    Mutex<
+        HashMap<
+            Uuid,
+            (
+                Arc<Mutex<SplitSink<WebSocketStream<TokioIo<Upgraded>>, Message>>>,
+                Arc<Mutex<SplitStream<WebSocketStream<TokioIo<Upgraded>>>>>,
+            ),
+        >,
+    >,
+>;
 
 pub struct Server {
     port: u16,
@@ -169,13 +181,14 @@ async fn handle_websocket(
             event!(Level::INFO, "Websocket connection established");
 
             let client_id = Uuid::new_v4();
-            // We also wrap our websocket in a Arc / Mutex in case we decide to send messages
-            // from multiple threads.
-            let websocket = Arc::new(Mutex::new(websocket));
+
+            let (ws_sender, ws_receiver) = websocket.split();
+            let ws_sender = Arc::new(Mutex::new(ws_sender));
+            let ws_receiver = Arc::new(Mutex::new(ws_receiver));
 
             {
                 let mut connections = connections.lock().await;
-                connections.insert(client_id, websocket.clone());
+                connections.insert(client_id, (ws_sender.clone(), ws_receiver.clone()));
                 event!(
                     Level::INFO,
                     "Websocket connection attached to active connections: {}",
@@ -183,26 +196,26 @@ async fn handle_websocket(
                 );
             }
 
-            while let Some(ws_message) = websocket.lock().await.next().await {
+            let ws_sender_clone = ws_sender.clone();
+            spawn(async move {
+                sleep(Duration::from_secs(5)).await;
+                let mut locked_ws_sender = ws_sender_clone.lock().await;
+                if let Err(e) = locked_ws_sender.send(Message::text("Ping!")).await {
+                    event!(Level::ERROR, "Failed to send 'ping': {}", e);
+                } else {
+                    event!(Level::DEBUG, "'pinged' client: {}", client_id);
+                }
+            });
+
+            let ws_receiver_clone = ws_receiver.clone();
+            while let Some(ws_message) = ws_receiver_clone.lock().await.next().await {
                 match ws_message {
                     Ok(message) => {
                         match message {
-                            Message::Text(msg) => {
-                                println!("Received text message: {msg}");
-                                websocket
-                                    .lock()
-                                    .await
-                                    .send(Message::text("Thank you, come again."))
-                                    .await?;
-                            }
-                            Message::Binary(msg) => {
-                                println!("Received binary message: {msg:02X?}");
-                                websocket
-                                    .lock()
-                                    .await
-                                    .send(Message::binary(b"Thank you, come again.".to_vec()))
-                                    .await?;
-                            }
+                            Message::Text(msg) => println!("Received text message: {msg}"),
+
+                            Message::Binary(msg) => println!("Received binary message: {msg:02X?}"),
+
                             Message::Ping(msg) => {
                                 // No need to send a reply: tungstenite takes care of this for you.
                                 println!("Received ping message: {msg:02X?}");
