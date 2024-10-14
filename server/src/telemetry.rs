@@ -34,9 +34,9 @@ struct MultiWriterGuard<'a> {
 
 impl<'a> Write for MultiWriterGuard<'a> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stdout.write(buf)?;
+        self.stdout.write_all(buf)?;
 
-        self.file.write(buf)?;
+        self.file.write_all(buf)?;
 
         Ok(buf.len())
     }

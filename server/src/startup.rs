@@ -16,6 +16,8 @@ use tokio::{net::TcpListener, spawn, sync::Mutex, time::sleep};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+use crate::configuration::Settings;
+
 type SharedConnections = Arc<
     Mutex<
         HashMap<
@@ -38,10 +40,11 @@ pub struct Server {
 impl Server {
     /// Builds the server, obtaining a port ready for listening. NOTE - This does not
     /// start listening for connections. Use the `run()` function to do so.
-    pub async fn build() -> Result<Self, Error> {
-        let listener = TcpListener::bind("0.0.0.0:0")
+    pub async fn build(configuration: Settings) -> Result<Self, Error> {
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", configuration.port))
             .await
-            .expect("Unable to bind to a random port");
+            .unwrap_or_else(|_| panic!("Unable to bind to port {}", configuration.port));
+
         let port = listener
             .local_addr()
             .expect("Unable to determine local address")
@@ -110,7 +113,7 @@ async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, Error> {
     tracing::Span::current().record(
         "client",
-        &tracing::field::display(
+        tracing::field::display(
             &request
                 .headers()
                 .get("host")
@@ -282,12 +285,19 @@ async fn handle_websocket(
 
 #[cfg(test)]
 mod tests {
+    use crate::configuration::get_configuration;
+
     use super::*;
     use tokio_tungstenite::connect_async;
 
     #[tokio::test]
     async fn health_check_works() {
-        let server = Server::build().await.expect("Failed to build server");
+        let mut configuration = get_configuration().expect("Failed to prepare configuration");
+        configuration.port = 0;
+
+        let server = Server::build(configuration)
+            .await
+            .expect("Failed to build server");
         let port = server.port;
 
         // Spawn the server on a background task
@@ -298,7 +308,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         let response = client
-            .get(&format!("http://127.0.0.1:{}/health-check", port))
+            .get(format!("http://127.0.0.1:{}/health-check", port))
             .send()
             .await
             .expect("Failed to execute request");
@@ -315,7 +325,12 @@ mod tests {
 
     #[tokio::test]
     async fn server_requests_upgrades_from_client() {
-        let server = Server::build().await.expect("Failed to build server");
+        let mut configuration = get_configuration().expect("Failed to prepare configuration");
+        configuration.port = 0;
+
+        let server = Server::build(configuration)
+            .await
+            .expect("Failed to build server");
         let port = server.port;
 
         // Spawn the server on a background task
@@ -326,7 +341,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         let response = client
-            .get(&format!("http://127.0.0.1:{}", port))
+            .get(format!("http://127.0.0.1:{}", port))
             .send()
             .await
             .expect("Failed to execute request");
@@ -341,9 +356,16 @@ mod tests {
 
     #[tokio::test]
     async fn client_can_connect_successfully() {
+        let mut configuration = get_configuration().expect("Failed to prepare configuration");
+        configuration.port = 0;
+
         // wrap the server in a counter so we can spawn a thread to run the server in a new
         // thread but still query for active connections after.
-        let server = Arc::new(Server::build().await.expect("Failed to build server"));
+        let server = Arc::new(
+            Server::build(configuration)
+                .await
+                .expect("Failed to build server"),
+        );
         let port = server.port;
 
         let server_clone = server.clone();

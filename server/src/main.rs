@@ -13,6 +13,7 @@ cargo run
 use std::error::Error;
 
 use server::{
+    configuration::get_configuration,
     startup::Server,
     telemetry::{get_subscriber, init_subscriber},
 };
@@ -23,7 +24,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let subscriber = get_subscriber(String::from("tunnelcrust-server"), String::from("info"));
     init_subscriber(subscriber);
 
-    let server = Server::build().await?;
+    // Prepare application configuration
+    let configuration = get_configuration().expect("Failed to prepare configuration. Have you populated the '/configuration/settings.yaml' file?");
+
+    let server = Server::build(configuration).await?;
 
     server.run().await;
 

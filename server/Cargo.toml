@@ -6,11 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+config = "0.14.0"
 futures = "0.3.30"
 http-body-util = "0.1.2"
 hyper = { version = "1.4.1", features = ["full"] }
 hyper-tungstenite = "0.15.0"
 hyper-util = { version = "0.1.8", features = ["full"] }
+serde = { version = "1.0.210", features = ["derive"] }
 tokio = { version = "1.40.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-bunyan-formatter = "0.3.9"
