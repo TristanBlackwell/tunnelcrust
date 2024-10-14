@@ -100,6 +100,10 @@ impl Server {
         }
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Returns the number of actively connected clients.
     pub async fn clients_len(&self) -> usize {
         self.connections.lock().await.len()
@@ -281,103 +285,4 @@ async fn handle_websocket(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::configuration::get_configuration;
-
-    use super::*;
-    use tokio_tungstenite::connect_async;
-
-    #[tokio::test]
-    async fn health_check_works() {
-        let mut configuration = get_configuration().expect("Failed to prepare configuration");
-        configuration.port = 0;
-
-        let server = Server::build(configuration)
-            .await
-            .expect("Failed to build server");
-        let port = server.port;
-
-        // Spawn the server on a background task
-        tokio::spawn(async move {
-            server.run().await;
-        });
-
-        let client = reqwest::Client::new();
-
-        let response = client
-            .get(format!("http://127.0.0.1:{}/health-check", port))
-            .send()
-            .await
-            .expect("Failed to execute request");
-
-        assert!(response.status().is_success());
-
-        let text = response
-            .text()
-            .await
-            .expect("Failed to read text from response");
-
-        assert_eq!(text, "Alive and kickin!");
-    }
-
-    #[tokio::test]
-    async fn server_requests_upgrades_from_client() {
-        let mut configuration = get_configuration().expect("Failed to prepare configuration");
-        configuration.port = 0;
-
-        let server = Server::build(configuration)
-            .await
-            .expect("Failed to build server");
-        let port = server.port;
-
-        // Spawn the server on a background task
-        tokio::spawn(async move {
-            server.run().await;
-        });
-
-        let client = reqwest::Client::new();
-
-        let response = client
-            .get(format!("http://127.0.0.1:{}", port))
-            .send()
-            .await
-            .expect("Failed to execute request");
-
-        assert_eq!(response.status().as_u16(), 426);
-
-        let headers = response.headers();
-
-        assert_eq!(headers.get("Connection").unwrap(), "upgrade");
-        assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
-    }
-
-    #[tokio::test]
-    async fn client_can_connect_successfully() {
-        let mut configuration = get_configuration().expect("Failed to prepare configuration");
-        configuration.port = 0;
-
-        // wrap the server in a counter so we can spawn a thread to run the server in a new
-        // thread but still query for active connections after.
-        let server = Arc::new(
-            Server::build(configuration)
-                .await
-                .expect("Failed to build server"),
-        );
-        let port = server.port;
-
-        let server_clone = server.clone();
-        // Spawn the server on a background task
-        tokio::spawn(async move {
-            server_clone.run().await;
-        });
-
-        let (_, _) = connect_async(format!("ws://localhost:{}", port))
-            .await
-            .expect("Failed to connect");
-
-        assert_eq!(server.clients_len().await, 1);
-    }
 }
