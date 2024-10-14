@@ -96,6 +96,11 @@ impl Server {
             }
         }
     }
+
+    /// Returns the number of actively connected clients.
+    pub async fn clients_len(&self) -> usize {
+        self.connections.lock().await.len()
+    }
 }
 
 #[instrument(name = "handle_request", skip(request, connections), fields(client = tracing::field::Empty))]
@@ -275,56 +280,82 @@ async fn handle_websocket(
     Ok(())
 }
 
-#[tokio::test]
-async fn health_check_works() {
-    let server = Server::build().await.expect("Failed to build server");
-    let port = server.port;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::connect_async;
 
-    // Spawn the server on a background task
-    tokio::spawn(async move {
-        server.run().await;
-    });
+    #[tokio::test]
+    async fn health_check_works() {
+        let server = Server::build().await.expect("Failed to build server");
+        let port = server.port;
 
-    let client = reqwest::Client::new();
+        // Spawn the server on a background task
+        tokio::spawn(async move {
+            server.run().await;
+        });
 
-    let response = client
-        .get(&format!("http://127.0.0.1:{}/health-check", port))
-        .send()
-        .await
-        .expect("Failed to execute request");
+        let client = reqwest::Client::new();
 
-    assert!(response.status().is_success());
+        let response = client
+            .get(&format!("http://127.0.0.1:{}/health-check", port))
+            .send()
+            .await
+            .expect("Failed to execute request");
 
-    let text = response
-        .text()
-        .await
-        .expect("Failed to read text from response");
+        assert!(response.status().is_success());
 
-    assert_eq!(text, "Alive and kickin!");
-}
+        let text = response
+            .text()
+            .await
+            .expect("Failed to read text from response");
 
-#[tokio::test]
-async fn requests_upgrade() {
-    let server = Server::build().await.expect("Failed to build server");
-    let port = server.port;
+        assert_eq!(text, "Alive and kickin!");
+    }
 
-    // Spawn the server on a background task
-    tokio::spawn(async move {
-        server.run().await;
-    });
+    #[tokio::test]
+    async fn server_requests_upgrades_from_client() {
+        let server = Server::build().await.expect("Failed to build server");
+        let port = server.port;
 
-    let client = reqwest::Client::new();
+        // Spawn the server on a background task
+        tokio::spawn(async move {
+            server.run().await;
+        });
 
-    let response = client
-        .get(&format!("http://127.0.0.1:{}", port))
-        .send()
-        .await
-        .expect("Failed to execute request");
+        let client = reqwest::Client::new();
 
-    assert_eq!(response.status().as_u16(), 426);
+        let response = client
+            .get(&format!("http://127.0.0.1:{}", port))
+            .send()
+            .await
+            .expect("Failed to execute request");
 
-    let headers = response.headers();
+        assert_eq!(response.status().as_u16(), 426);
 
-    assert_eq!(headers.get("Connection").unwrap(), "upgrade");
-    assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
+        let headers = response.headers();
+
+        assert_eq!(headers.get("Connection").unwrap(), "upgrade");
+        assert_eq!(headers.get("Upgrade").unwrap(), "websocket");
+    }
+
+    #[tokio::test]
+    async fn client_can_connect_successfully() {
+        // wrap the server in a counter so we can spawn a thread to run the server in a new
+        // thread but still query for active connections after.
+        let server = Arc::new(Server::build().await.expect("Failed to build server"));
+        let port = server.port;
+
+        let server_clone = server.clone();
+        // Spawn the server on a background task
+        tokio::spawn(async move {
+            server_clone.run().await;
+        });
+
+        let (_, _) = connect_async(format!("ws://localhost:{}", port))
+            .await
+            .expect("Failed to connect");
+
+        assert_eq!(server.clients_len().await, 1);
+    }
 }

@@ -2,8 +2,17 @@
 This crate is the client CLI for tunnelcrust. It extends helper methods to easily spin up a tunnel from
 your local machine.
 
+The simplest way to get started (assuming you are using cargo directly) is to use the `--port` argument.
+This will start the client, connect to the server, and direct any traffic to localhost on the port specified:
+
 ```bash
-client --url http://localhost:3000
+cargo run -- --port 3000
+```
+
+you can use the help command to view the available options:
+
+```bash
+cargo run -- --help
 ```
 */
 

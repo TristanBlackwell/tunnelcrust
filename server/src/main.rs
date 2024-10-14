@@ -4,6 +4,10 @@ in which clients (see client package) will connect to for the tunneling to take 
 
 The server is responsible for maintaining an active connection to a client, receiving incoming
 requests, and forwarding these to the connected client to produce a response.
+
+```bash
+cargo run
+```
 */
 
 use std::error::Error;

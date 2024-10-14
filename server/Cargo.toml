@@ -18,8 +18,11 @@ tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 uuid = { version = "1.10.0", features = ["v4"] }
 
+[dev-dependencies]
+tokio-tungstenite = "0.24.0"
+
+
 [dependencies.reqwest]
 version = "0.12.7"
 default-features = false
-# We need the `json` feature flag to serialize/deserialize JSON payloads
 features = ["cookies", "json", "rustls-tls"]
