@@ -11,7 +11,7 @@ use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt, EnvFilter, Regis
 
 /// A writer that sends output to both stdout and a file.
 struct MultiWriter {
-    stdout: Stdout,
+    _stdout: Stdout,
     file: Mutex<File>, // We use a Mutex to allow safe concurrent access
 }
 
@@ -55,7 +55,7 @@ pub fn get_subscriber(name: String, env_filter: String) -> impl Subscriber + Sen
 
     // The multi-writer will write logs to std out & to the log file above.
     let multi_writer = MultiWriter {
-        stdout: io::stdout(),
+        _stdout: io::stdout(),
         file: Mutex::new(file),
     };
 

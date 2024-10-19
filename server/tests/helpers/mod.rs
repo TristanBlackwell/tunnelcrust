@@ -1,4 +1,4 @@
-use server::{configuration::get_configuration, startup::Server};
+use server::{configuration::get_configuration, server::Server};
 use std::sync::Arc;
 
 pub struct TestApplication {

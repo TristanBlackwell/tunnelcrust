@@ -1,24 +1,25 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use core::fmt;
+use std::{collections::HashMap, sync::Arc};
 
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
-use futures::stream::StreamExt;
 use futures::SinkExt;
+use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
-use hyper_tungstenite::{
-    is_upgrade_request, tungstenite::error::ProtocolError, tungstenite::Error::AlreadyClosed,
-    tungstenite::Error::ConnectionClosed, tungstenite::Error::Protocol, tungstenite::Message,
-    upgrade, HyperWebsocket, WebSocketStream,
-};
+use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, WebSocketStream};
 use hyper_util::rt::TokioIo;
-use tokio::{net::TcpListener, spawn, sync::Mutex, time::sleep};
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use crate::configuration::Settings;
+use crate::error::Error;
+use crate::websocket::websocket_controller;
 
-type SharedConnections = Arc<
+pub type SharedConnections = Arc<
     Mutex<
         HashMap<
             Uuid,
@@ -110,6 +111,24 @@ impl Server {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ForwardedRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+}
+
+impl fmt::Display for ForwardedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "method:{},path:{},body:{:?}",
+            self.method, self.path, self.body
+        )
+    }
+}
+
 #[instrument(name = "handle_request", skip(request, connections), fields(client = tracing::field::Empty))]
 async fn handle_request(
     mut request: Request<hyper::body::Incoming>,
@@ -143,7 +162,7 @@ async fn handle_request(
                         );
 
                         tokio::spawn(async move {
-                            if let Err(err) = handle_websocket(websocket, connections).await {
+                            if let Err(err) = websocket_controller(websocket, connections).await {
                                 event!(
                                     Level::ERROR,
                                     "Failure during websocket connection: {:?}",
@@ -167,8 +186,45 @@ async fn handle_request(
             } else {
                 event!(
                     Level::INFO,
-                    "Client sent a standard HTTP request. Sending back 426 upgrade response"
+                    "Incoming HTTP request. Sending back 426 upgrade response"
                 );
+
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let headers: Vec<(String, String)> = request
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+
+                let body_bytes = request.collect().await?.to_bytes();
+                let body_str = if !body_bytes.is_empty() {
+                    Some(String::from_utf8(body_bytes.to_vec())?)
+                } else {
+                    None
+                };
+
+                let request_to_forward = ForwardedRequest {
+                    method,
+                    path,
+                    headers,
+                    body: body_str,
+                };
+
+                let connections = connections.lock().await;
+                if connections.len() > 0 {
+                    for (key, value) in connections.iter() {
+                        event!(Level::INFO, "Forwarding HTTP request to {}", key);
+
+                        let mut ws_sender = value.0.lock().await;
+
+                        ws_sender
+                            .send(Message::Text(request_to_forward.to_string()))
+                            .await
+                            .unwrap();
+                    }
+                }
+
                 // Inform the client we're expecting upgrade requests here
                 Ok(Response::builder()
                     .status(426)
@@ -179,110 +235,4 @@ async fn handle_request(
             }
         }
     }
-}
-
-type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
-
-#[instrument(name = "handle_websocket", skip(websocket, connections))]
-async fn handle_websocket(
-    websocket: HyperWebsocket,
-    connections: SharedConnections,
-) -> Result<(), Error> {
-    match websocket.await {
-        Ok(websocket) => {
-            event!(Level::INFO, "Websocket connection established");
-
-            let client_id = Uuid::new_v4();
-
-            let (ws_sender, ws_receiver) = websocket.split();
-            let ws_sender = Arc::new(Mutex::new(ws_sender));
-            let ws_receiver = Arc::new(Mutex::new(ws_receiver));
-
-            {
-                let mut connections = connections.lock().await;
-                connections.insert(client_id, (ws_sender.clone(), ws_receiver.clone()));
-                event!(
-                    Level::INFO,
-                    "Websocket connection attached to active connections: {}",
-                    client_id
-                );
-            }
-
-            let ws_sender_clone = ws_sender.clone();
-            spawn(async move {
-                sleep(Duration::from_secs(5)).await;
-                let mut locked_ws_sender = ws_sender_clone.lock().await;
-                if let Err(e) = locked_ws_sender.send(Message::text("Ping!")).await {
-                    event!(Level::ERROR, "Failed to send 'ping': {}", e);
-                } else {
-                    event!(Level::DEBUG, "'pinged' client: {}", client_id);
-                }
-            });
-
-            let ws_receiver_clone = ws_receiver.clone();
-            while let Some(ws_message) = ws_receiver_clone.lock().await.next().await {
-                match ws_message {
-                    Ok(message) => {
-                        match message {
-                            Message::Text(msg) => println!("Received text message: {msg}"),
-
-                            Message::Binary(msg) => println!("Received binary message: {msg:02X?}"),
-
-                            Message::Ping(msg) => {
-                                // No need to send a reply: tungstenite takes care of this for you.
-                                println!("Received ping message: {msg:02X?}");
-                            }
-                            Message::Pong(msg) => {
-                                println!("Received pong message: {msg:02X?}");
-                            }
-                            Message::Close(msg) => {
-                                // No need to send a reply: tungstenite takes care of this for you.
-                                if let Some(msg) = &msg {
-                                    println!(
-                                        "Received close message with code {} and message: {}",
-                                        msg.code, msg.reason
-                                    );
-                                } else {
-                                    println!("Received close message");
-                                }
-                            }
-                            Message::Frame(_msg) => {
-                                unreachable!();
-                            }
-                        }
-                    }
-                    Err(err) => match err {
-                        ConnectionClosed => {
-                            event!(Level::INFO, "WebSocket close handshake complete");
-                        }
-                        AlreadyClosed => {
-                            event!(Level::WARN, "Websocket connection was already closed")
-                        }
-                        Protocol(protocol_err) => match protocol_err {
-                            ProtocolError::ResetWithoutClosingHandshake => {
-                                event!(Level::WARN, "Websocket closed without completing handshake")
-                            }
-                            _ => event!(Level::ERROR, "Websocket protocol error"),
-                        },
-                        err => event!(Level::ERROR, "Websocket error during connection: {}", err),
-                    },
-                }
-            }
-
-            {
-                let mut connections = connections.lock().await;
-                connections.remove(&client_id);
-                event!(
-                    Level::INFO,
-                    "Websocket connection removed from active connections: {}",
-                    client_id
-                )
-            }
-        }
-        Err(err) => {
-            event!(Level::ERROR, "Failed to establish websocket connection. Has the upgrade response been sent to the client?: {:?}", err);
-        }
-    }
-
-    Ok(())
 }

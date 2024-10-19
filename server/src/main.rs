@@ -14,7 +14,7 @@ use std::error::Error;
 
 use server::{
     configuration::get_configuration,
-    startup::Server,
+    server::Server,
     telemetry::{get_subscriber, init_subscriber},
 };
 
