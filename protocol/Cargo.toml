@@ -1,0 +1,12 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1.83"
+byteorder = "1.5.0"
+http-body-util = "0.1.2"
+hyper = "1.5.0"

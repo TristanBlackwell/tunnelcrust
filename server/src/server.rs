@@ -4,11 +4,11 @@ use std::{collections::HashMap, sync::Arc};
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
 use futures::SinkExt;
-use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
 use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, WebSocketStream};
 use hyper_util::rt::TokioIo;
+use protocol::RequestIncomingBinaryProtocol;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::{net::TcpListener, sync::Mutex};
@@ -189,27 +189,10 @@ async fn handle_request(
                     "Incoming HTTP request. Sending back 426 upgrade response"
                 );
 
-                let method = request.method().to_string();
-                let path = request.uri().path().to_string();
-                let headers: Vec<(String, String)> = request
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
-
-                let body_bytes = request.collect().await?.to_bytes();
-                let body_str = if !body_bytes.is_empty() {
-                    Some(String::from_utf8(body_bytes.to_vec())?)
-                } else {
-                    None
-                };
-
-                let request_to_forward = ForwardedRequest {
-                    method,
-                    path,
-                    headers,
-                    body: body_str,
-                };
+                let serialized = request
+                    .serialize()
+                    .await
+                    .expect("Failed to serialize request");
 
                 let connections = connections.lock().await;
                 if connections.len() > 0 {
@@ -219,7 +202,7 @@ async fn handle_request(
                         let mut ws_sender = value.0.lock().await;
 
                         ws_sender
-                            .send(Message::Text(request_to_forward.to_string()))
+                            .send(Message::Binary(serialized.clone()))
                             .await
                             .unwrap();
                     }

@@ -20,6 +20,8 @@ use std::env;
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use hyper::body::Bytes;
+use protocol::RequestBytesBinaryProtocol;
 use tokio::io::AsyncReadExt;
 use tokio_tungstenite::{
     connect_async,
@@ -88,6 +90,14 @@ async fn main() {
             Some(message) = read.next() => {
                 match message {
                     Ok(Message::Text(text)) => println!("Received text: {}", text),
+                    Ok(Message::Binary(bytes)) => {
+                        println!("Received bytes");
+
+                        let request = hyper::Request::<Bytes>::deserialize(&bytes).await.expect("Failed to deserialize request");
+
+                        println!("Method: {:?}, path: {:?}, headers_len: {:?}, body: {:?}", request.method(), request.uri().path(), request.headers(), request.body())
+
+                    },
                     Ok(Message::Close(frame)) => {
                         println!("Received close: {:#?}", frame);
                         break;  // Exit the loop on close
