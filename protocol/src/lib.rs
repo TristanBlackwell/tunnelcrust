@@ -1,3 +1,23 @@
+/*!
+This is an internal crate for tunnelcrust exposing a binary protocol for message passing.
+
+## Context
+
+A tunneling application like tunnelcrust has the requirement of passing data between client & server
+connections in the form of HTTP requests. Clients connect to the server via WebSockets such that
+data passed between them is in form of these messages. WebSockets often a few methods for this
+of which binary messages typically involve the lowest overhead.
+
+## How
+
+The data passed between client & server is HTTP request components. To minimise the overhead on these
+transfers, this crate defines a binary protocol which allows these requests to be serialized and
+deserialized and sent via a message.
+
+Largely this protocol is designed against the [`hyper::Request`] since this is used by both applications.
+Each component has a description for how it's component is serialized.
+*/
+
 use core::str;
 use std::io::{Cursor, Read, Write};
 
