@@ -12,4 +12,6 @@ futures-util = "0.3.30"
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-tungstenite = "0.24.0"
 protocol = { path = "../protocol" }
-hyper = "1.5.0"
+hyper = { version = "1.4.1", features = ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
