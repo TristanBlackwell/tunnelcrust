@@ -1,7 +1,8 @@
 const http = require('http');
 
 const server = http.createServer((req, res) => {
-  console.log("Request received");
+  console.log(`Request received - ${req}`);
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Back to you!\n');
 });

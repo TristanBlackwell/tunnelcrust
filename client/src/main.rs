@@ -68,116 +68,120 @@ async fn main() {
         url
     } else {
         format!(
-            "http://localhost:{}",
+            "http://0.0.0.0:{}",
             args.location
                 .port
                 .expect("Unable to determine port. Please use '--url' argument instead.")
         )
     };
 
+    println!("Establishing connection with {}...", &address);
+
+    let stream = TcpStream::connect(&address.replace("http://", ""))
+        .await
+        .expect("Failed to connect to address");
+
+    // Use an adapter to access something implementing `tokio::io` traits as if they implement
+    // `hyper::rt` IO traits.
+    let io = TokioIo::new(stream);
+
+    // Create the Hyper client
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .expect("Failed to create the client");
+
+    // Spawn a task to poll the connection, driving the HTTP state
+    tokio::task::spawn(async move {
+        if let Err(err) = conn.await {
+            eprintln!("Connection failed: {:?}", err);
+        }
+    });
+
+    println!("Connection established");
+
     let server_url = env::var("TUNNELCRUST_SERVER_URL")
         .expect("Unknown server address. Is the `TUNNELCRUST_SERVER_URL` set?");
 
-    println!("Setting up a tunnel connection to '{}'...", address);
+    println!("Connecting to the remote tunnel");
 
     let (_, mut stdin_rx) = futures_channel::mpsc::unbounded::<Message>();
 
     // Establish the WebSocket connection to the proxy server.
     let (ws_stream, _) = connect_async(server_url).await.expect("Failed to connect");
-    println!("WebSocket handshake has been successfully completed");
+
+    println!("Tunnel connected");
 
     let (mut write, mut read) = ws_stream.split();
 
     loop {
         tokio::select! {
-                    // Incoming message
-                    Some(message) = read.next() => {
-                        match message {
-                            Ok(Message::Text(text)) => println!("Received text: {}", text),
-                            Ok(Message::Binary(bytes)) => {
-                                println!("Received bytes");
+            // Incoming message
+            Some(message) = read.next() => {
+                match message {
+                    Ok(Message::Text(text)) => println!("Received text: {}", text),
+                    Ok(Message::Binary(bytes)) => {
+                        println!("Received bytes");
 
-                                let request = hyper::Request::<Bytes>::deserialize(&bytes).await.expect("Failed to deserialize request");
+                        let request = hyper::Request::<Bytes>::deserialize(&bytes).await.expect("Failed to deserialize request");
 
-                                println!("Method: {:?}, path: {:?}, headers_len: {:?}, body: {:?}", request.method(), request.uri().path(), request.headers(), request.body());
+                        println!("Method: {:?}, path: {:?}, headers_len: {:?}, body: {:?}", request.method(), request.uri().path(), request.headers(), request.body());
 
-                                // Create our URI. This is the local address we're targetting combined with the path from the request that
-                                // has been forward.
-                                let uri = format!("{}{}", address, request.uri().path()).parse::<hyper::Uri>().expect("Failed to parse URI");
+                        // Create our URI. This is the local address we're targetting combined with the path from the request that
+                        // has been forward.
+                        let uri = format!("{}{}", &address, request.uri().path()).parse::<hyper::Uri>().expect("Failed to parse URI");
 
-                                let host = uri.host().expect("uri has no host");
-                                let port = uri.port_u16().unwrap_or(80);
-                                let address = format!("{}:{}", host, port);
-        dbg!(&address);
-                                // Open a TCP connection to the remote host
-                                let stream = TcpStream::connect(address).await.expect("Failed to connect to address");
 
-                                // Use an adapter to access something implementing `tokio::io` traits as if they implement
-                                // `hyper::rt` IO traits.
-                                let io = TokioIo::new(stream);
+                        let authority = uri.authority().unwrap().clone();
 
-                                // Create the Hyper client
-                                let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.expect("Failed to create the client");
+                        // Create an HTTP request with an empty body and a HOST header
+                        let req = Request::builder()
+                            .uri(uri)
+                            .header(hyper::header::HOST, authority.as_str())
+                            .body(Empty::<Bytes>::new()).expect("Failed to build request");
 
-                                // Spawn a task to poll the connection, driving the HTTP state
-                                tokio::task::spawn(async move {
-                                    if let Err(err) = conn.await {
-                                        println!("Connection failed: {:?}", err);
-                                    }
-                                });
+                        // Await the response...
+                        let mut res = sender.send_request(req).await.expect("Failed tos send request");
 
-                                // The authority of our URL will be the hostname of the httpbin remote
-                                let authority = uri.authority().unwrap().clone();
+                        println!("Response status: {}", res.status());
 
-                                // Create an HTTP request with an empty body and a HOST header
-                                let req = Request::builder()
-                                    .uri(uri)
-                                    .header(hyper::header::HOST, authority.as_str())
-                                    .body(Empty::<Bytes>::new()).expect("Failed to build request");
-
-                                // Await the response...
-                                let mut res = sender.send_request(req).await.expect("Failed tos send request");
-
-                                println!("Response status: {}", res.status());
-
-                                // Stream the body, writing each frame to stdout as it arrives
-                                while let Some(next) = res.frame().await {
-                                    let frame = next.expect("Failed to get next frame");
-                                    if let Some(chunk) = frame.data_ref() {
-                                        io::stdout().write_all(chunk).await.expect("Failed to write response to output");
-                                    }
-                                }
-                            },
-                            Ok(Message::Close(frame)) => {
-                                println!("Received close: {:#?}", frame);
-                                break;  // Exit the loop on close
+                        // Stream the body, writing each frame to stdout as it arrives
+                        while let Some(next) = res.frame().await {
+                            let frame = next.expect("Failed to get next frame");
+                            if let Some(chunk) = frame.data_ref() {
+                                io::stdout().write_all(chunk).await.expect("Failed to write response to output");
                             }
-                            Err(Error::ConnectionClosed) => {
-                                println!("Connection was closed");
-                                break;
-                            }
-                            Err(err) => eprintln!("Error: {}", err),
-                            _ => println!("Unhandled message"),
                         }
+                    },
+                    Ok(Message::Close(frame)) => {
+                        println!("Received close: {:#?}", frame);
+                        break;  // Exit the loop on close
                     }
-                    // Outgoing message
-                    Some(msg) = stdin_rx.next() => {
-                        if let Err(e) = write.send(msg).await {
-                            eprintln!("Failed to send message to WebSocket: {}", e);
-                            break;
-                        }
+                    Err(Error::ConnectionClosed) => {
+                        println!("Connection was closed");
+                        break;
                     }
-                    // Handle Ctrl+C interrupt
-                    _ = tokio::signal::ctrl_c() => {
-                        println!();
-                        println!("Closing connection...");
-
-                        if let Err(e) = write.send(Message::Close(None)).await {
-                            eprintln!("Failed to send close message: {}", e);
-                        }
-                        break;  // Exit the loop after sending close message.
-                    }
+                    Err(err) => eprintln!("Error: {}", err),
+                    _ => println!("Unhandled message"),
                 }
+            }
+            // Outgoing message
+            Some(msg) = stdin_rx.next() => {
+                if let Err(e) = write.send(msg).await {
+                    eprintln!("Failed to send message to WebSocket: {}", e);
+                    break;
+                }
+            }
+            // Handle Ctrl+C interrupt
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                println!("Closing connection...");
+
+                if let Err(e) = write.send(Message::Close(None)).await {
+                    eprintln!("Failed to send close message: {}", e);
+                }
+                break;  // Exit the loop after sending close message.
+            }
+        }
     }
 
     println!("Connection closed.");
