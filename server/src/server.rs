@@ -44,7 +44,9 @@ impl Server {
     pub async fn build(configuration: Settings) -> Result<Self, Error> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", configuration.port))
             .await
-            .unwrap_or_else(|_| panic!("Unable to bind to port {}", configuration.port));
+            .unwrap_or_else(|error| {
+                panic!("Unable to bind to port {}: {}", configuration.port, error)
+            });
 
         let port = listener
             .local_addr()
