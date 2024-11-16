@@ -20,12 +20,12 @@ use std::env;
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::client::conn::http1::SendRequest;
+use hyper::Request;
 use hyper_util::rt::TokioIo;
-use protocol::RequestBytesBinaryProtocol;
-use tokio::io::{self, AsyncWriteExt as _};
+use protocol::{RequestBytesBinaryProtocol, ResponseIncomingBinaryProtocol};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     connect_async,
@@ -97,7 +97,26 @@ async fn main() {
                 match message {
                     Ok(Message::Text(text)) => println!("Received text: {}", text),
                     Ok(Message::Binary(bytes)) => {
-                        process_bytes(bytes, &mut sender).await;
+                        let request = process_bytes(bytes).await;
+
+                        println!("Request received from tunnel. Forwarding to local service...");
+
+                        let mut res = sender
+                            .send_request(request)
+                            .await
+                            .expect("Failed to send request");
+
+                        println!("Response status: {}", res.status());
+
+                        let serialized = res
+                            .serialize()
+                            .await
+                            .expect("Failed to serialize response");
+
+                            if let Err(e) = write.send(Message::Binary(serialized)).await {
+                                eprintln!("Failed to send message to WebSocket: {}", e);
+                                break;
+                            }
                     },
                     Ok(Message::Close(frame)) => {
                         println!("Received close: {:#?}", frame);
@@ -137,6 +156,7 @@ async fn main() {
 async fn establish_local_connection(address: &str) -> SendRequest<Full<Bytes>> {
     println!("Establishing connection with {}...", address);
 
+    // TODO: Warn on local service not running and implement continuous retry logic
     let stream = TcpStream::connect(&address.replace("http://", ""))
         .await
         .expect("Failed to connect to address");
@@ -162,38 +182,12 @@ async fn establish_local_connection(address: &str) -> SendRequest<Full<Bytes>> {
     sender
 }
 
-async fn process_bytes(bytes: Vec<u8>, sender: &mut SendRequest<Full<Bytes>>) {
-    println!("Received bytes");
-
+/// Reconstructs incoming bytes from the tunnel websocket connection
+/// as an forwarded request.
+async fn process_bytes(bytes: Vec<u8>) -> Request<Full<Bytes>> {
     let request = hyper::Request::<Bytes>::deserialize(&bytes)
         .await
         .expect("Failed to deserialize request");
 
-    let request_with_body = request.clone().map(Full::new);
-
-    println!(
-        "Method: {:?}, path: {:?}, headers_len: {:?}, body: {:?}",
-        request.method(),
-        request.uri().path(),
-        request.headers(),
-        request.body()
-    );
-
-    let mut res = sender
-        .send_request(request_with_body.to_owned())
-        .await
-        .expect("Failed to send request");
-
-    println!("Response status: {}", res.status());
-
-    // Stream the body, writing each frame to stdout as it arrives
-    while let Some(next) = res.frame().await {
-        let frame = next.expect("Failed to get next frame");
-        if let Some(chunk) = frame.data_ref() {
-            io::stdout()
-                .write_all(chunk)
-                .await
-                .expect("Failed to write response to output");
-        }
-    }
+    request.clone().map(Full::new)
 }

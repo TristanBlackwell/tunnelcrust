@@ -1,4 +1,3 @@
-use core::fmt;
 use std::{collections::HashMap, sync::Arc};
 
 use futures::stream::SplitSink;
@@ -9,8 +8,6 @@ use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
 use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, WebSocketStream};
 use hyper_util::rt::TokioIo;
 use protocol::RequestIncomingBinaryProtocol;
-use serde::Deserialize;
-use serde::Serialize;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
@@ -110,24 +107,6 @@ impl Server {
     /// Returns the number of actively connected clients.
     pub async fn clients_len(&self) -> usize {
         self.connections.lock().await.len()
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ForwardedRequest {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Option<String>,
-}
-
-impl fmt::Display for ForwardedRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "method:{},path:{},body:{:?}",
-            self.method, self.path, self.body
-        )
     }
 }
 

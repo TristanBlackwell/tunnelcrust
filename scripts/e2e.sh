@@ -3,6 +3,10 @@
 # A end-to-end test script which spins up the server, client, and mock server before
 # sending a request all the way through the system.
 
+# It's best to ensure you have built the server & client packages ahead of this script. This
+# spawns each on a new thread and doesn't wait for build times so the request may fail if a
+# component is not running when the request is made.
+
 # Start components
 
 echo "Starting server..."

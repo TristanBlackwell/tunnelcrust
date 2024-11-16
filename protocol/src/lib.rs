@@ -26,7 +26,7 @@ use http_body_util::BodyExt;
 use hyper::{
     body::{Bytes, Incoming},
     header::{HeaderName, HeaderValue},
-    HeaderMap, Method, Request, Uri,
+    HeaderMap, Method, Request, Response, StatusCode, Uri,
 };
 
 /// Serialize / Deserialize signatures for encoding a [`hyper::Method`]
@@ -79,7 +79,7 @@ impl MethodBinaryProtocol for Method {
 }
 
 /// Serialize / Deserialize signatures for encoding [`hyper`]
-/// request components in a byte representation.
+/// request/response components in a byte representation.
 trait ComponentBinaryProtocol {
     fn serialize(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
 
@@ -355,7 +355,6 @@ impl RequestBytesBinaryProtocol for Request<Bytes> {
     ///},
     /// ```
     async fn deserialize(buffer: &[u8]) -> Result<Request<Bytes>, Box<dyn std::error::Error>> {
-        println!("Buffer is: {:?}", buffer);
         let mut cursor = Cursor::new(buffer);
 
         // Deserialize the method (as a single u8)
@@ -390,6 +389,101 @@ impl RequestBytesBinaryProtocol for Request<Bytes> {
         let request = request.body(body_bytes)?;
 
         Ok(request)
+    }
+}
+
+/// Serialize signature for [`hyper::Response<Incoming>`]
+/// in it's byte representation.
+#[async_trait::async_trait]
+pub trait ResponseIncomingBinaryProtocol {
+    async fn serialize(&mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
+}
+
+#[async_trait::async_trait]
+impl ResponseIncomingBinaryProtocol for Response<Incoming> {
+    /// Serializes a [`hyper::Response<Incoming>`] into a byte representation.
+    ///
+    /// This will serialize the responses's status code, headers, and body (if present). This
+    /// can be deserialized into a [`hyper::Response<Bytes>`]. The reason for this is that a
+    /// [`hyper::Response<Incoming>`] represents a stream of bytes and should not be instantiated
+    /// directly. Since we have the bytes available it can be read directly.
+    async fn serialize(&mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut buffer = Vec::new();
+
+        // Serialize the status code (as u16)
+        let status_code = self.status().as_u16();
+        buffer.write_u16::<byteorder::BigEndian>(status_code)?;
+
+        // Serialize the headers (using BinaryProtocol for HeaderMap)
+        buffer.extend(self.headers().serialize()?);
+
+        let body_bytes = self.collect().await?.to_bytes();
+        buffer.extend(body_bytes.serialize()?);
+
+        buffer.extend(body_bytes.serialize()?);
+
+        Ok(buffer)
+    }
+}
+
+/// Deserialize signature for [`hyper::Response<Incoming>`]
+/// in it's byte representation.
+#[async_trait::async_trait]
+pub trait ResponseBytesBinaryProtocol {
+    async fn deserialize(buffer: &[u8]) -> Result<Response<Bytes>, Box<dyn std::error::Error>>;
+}
+
+#[async_trait::async_trait]
+impl ResponseBytesBinaryProtocol for Response<Bytes> {
+    /// Deserializes a byte representation of a [`hyper::Response`] to it's original
+    /// type.
+    ///
+    /// This is designed to be used against a serialized [`hyper::Response<Incoming>`]
+    /// for which is exampled in the above types `serialize()` function.
+    ///
+    /// ## Example
+    /// ```
+    /// ...
+    /// // Assuming you receive bytes (`Vec[u8]`) from somewhere where a
+    /// // request was serialized.
+    ///Ok(Message::Binary(bytes)) => {
+    ///	println!("Received bytes");
+    ///
+    ///	// hyper::Response<Bytes>
+    ///	let request = hyper::Response::<Bytes>::deserialize(&bytes).await.expect("Failed to deserialize response");
+    ///},
+    /// ```
+    async fn deserialize(buffer: &[u8]) -> Result<Response<Bytes>, Box<dyn std::error::Error>> {
+        let mut cursor = Cursor::new(buffer);
+
+        // Deserialize the status code (as a single u16)
+        let status_code_u16 = cursor.read_u16::<byteorder::BigEndian>()?;
+        let status_code = StatusCode::from_u16(status_code_u16)?;
+
+        // Deserialize the headers (2 bytes for header count + X (headers_len) bytes for content)
+        let headers = HeaderMap::deserialize(&buffer[cursor.position() as usize..])?;
+
+        let headers_len = headers.iter().fold(0, |acc, (key, value)| {
+            // 2 bytes for key len and then length of key
+            let key_len = 2 + key.as_str().len();
+            // Same as key but for value
+            let value_len = 2 + value.as_bytes().len();
+            acc + key_len + value_len
+        });
+        cursor.set_position(cursor.position() + 2 + headers_len as u64);
+
+        // Deserialize the body as the remaining buffer.
+        let body_bytes = Bytes::deserialize(&buffer[cursor.position() as usize..])?;
+
+        let mut response = Response::builder().status(status_code);
+
+        for (key, value) in headers.iter() {
+            response = response.header(key, value);
+        }
+
+        let response = response.body(body_bytes)?;
+
+        Ok(response)
     }
 }
 

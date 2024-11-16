@@ -1,3 +1,5 @@
+use hyper::body::Bytes;
+use protocol::ResponseBytesBinaryProtocol;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
@@ -57,7 +59,17 @@ pub async fn websocket_controller(
                         match message {
                             Message::Text(msg) => println!("Received text message: {msg}"),
 
-                            Message::Binary(msg) => println!("Received binary message: {msg:02X?}"),
+                            Message::Binary(msg) => {
+                                println!("Received binary message: {msg:02X?}");
+                                let response = hyper::Response::<Bytes>::deserialize(&msg)
+                                    .await
+                                    .expect("Failed to deserialize response");
+
+                                println!("Deserialized");
+                                println!("{}", response.status());
+
+                                // TODO: Sent out to the big wide world
+                            }
 
                             Message::Ping(msg) => {
                                 // No need to send a reply: tungstenite takes care of this for you.
