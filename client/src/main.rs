@@ -31,6 +31,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Error, Message},
 };
+use uuid::Uuid;
 
 // CLI arguments
 #[derive(Parser, Debug)]
@@ -97,12 +98,12 @@ async fn main() {
                 match message {
                     Ok(Message::Text(text)) => println!("Received text: {}", text),
                     Ok(Message::Binary(bytes)) => {
-                        let request = process_bytes(bytes).await;
+                        let request_parts = process_bytes(bytes).await;
 
-                        println!("Request received from tunnel. Forwarding to local service...");
+                        println!("Request {} received from tunnel. Forwarding to local service...", request_parts.0);
 
                         let mut res = sender
-                            .send_request(request)
+                            .send_request(request_parts.1)
                             .await
                             .expect("Failed to send request");
 
@@ -113,7 +114,8 @@ async fn main() {
                             .await
                             .expect("Failed to serialize response");
 
-                            if let Err(e) = write.send(Message::Binary(serialized)).await {
+                            let request_id_bytes = request_id.to_bytes_le();
+                            if let Err(e) = write.send(Message::Binary([&request_id_bytes, serialized.clone().as_slice()].concat())).await {
                                 eprintln!("Failed to send message to WebSocket: {}", e);
                                 break;
                             }
@@ -184,10 +186,16 @@ async fn establish_local_connection(address: &str) -> SendRequest<Full<Bytes>> {
 
 /// Reconstructs incoming bytes from the tunnel websocket connection
 /// as an forwarded request.
-async fn process_bytes(bytes: Vec<u8>) -> Request<Full<Bytes>> {
+async fn process_bytes(bytes: Vec<u8>) -> (Uuid, Request<Full<Bytes>>) {
+    let request_id_bytes = &bytes[0..16];
+    let array: [u8; 16] = request_id_bytes
+        .try_into()
+        .expect("Slice has wrong length!");
+    let request_id = Uuid::from_bytes_le(array);
+
     let request = hyper::Request::<Bytes>::deserialize(&bytes)
         .await
         .expect("Failed to deserialize request");
 
-    request.clone().map(Full::new)
+    (request_id, request.clone().map(Full::new))
 }

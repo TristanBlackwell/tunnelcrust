@@ -15,3 +15,4 @@ protocol = { path = "../protocol" }
 hyper = { version = "1.4.1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full"] }
+uuid = { version = "1.10.0", features = ["v4"] }

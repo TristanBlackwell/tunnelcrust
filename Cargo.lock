@@ -242,6 +242,7 @@ dependencies = [
  "protocol",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]

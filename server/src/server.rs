@@ -8,6 +8,7 @@ use hyper::{body::Bytes, upgrade::Upgraded, Request, Response};
 use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade, WebSocketStream};
 use hyper_util::rt::TokioIo;
 use protocol::RequestIncomingBinaryProtocol;
+use tokio::sync::oneshot;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
@@ -28,11 +29,14 @@ pub type SharedConnections = Arc<
     >,
 >;
 
+pub type PendingRequests = Arc<Mutex<HashMap<Uuid, oneshot::Sender<Response<Bytes>>>>>;
+
 pub struct Server {
     port: u16,
     listener: TcpListener,
     // A HashMap of active websocket connections
     connections: SharedConnections,
+    pending_requests: PendingRequests,
 }
 
 impl Server {
@@ -54,6 +58,7 @@ impl Server {
             port,
             listener,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -170,6 +175,9 @@ async fn handle_request(
                     "Incoming HTTP request. Sending back 426 upgrade response"
                 );
 
+                let request_id = Uuid::new_v4();
+                let request_id_bytes = request_id.to_bytes_le();
+
                 let serialized = request
                     .serialize()
                     .await
@@ -183,7 +191,9 @@ async fn handle_request(
                         let mut ws_sender = value.0.lock().await;
 
                         ws_sender
-                            .send(Message::Binary(serialized.clone()))
+                            .send(Message::Binary(
+                                [&request_id_bytes, serialized.clone().as_slice()].concat(),
+                            ))
                             .await
                             .unwrap();
                     }
