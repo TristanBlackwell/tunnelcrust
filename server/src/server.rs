@@ -29,13 +29,14 @@ pub type SharedConnections = Arc<
     >,
 >;
 
-pub type PendingRequests = Arc<Mutex<HashMap<Uuid, oneshot::Sender<Response<Bytes>>>>>;
+pub type PendingRequests = Arc<Mutex<HashMap<Uuid, oneshot::Sender<Response<Full<Bytes>>>>>>;
 
 pub struct Server {
     port: u16,
     listener: TcpListener,
     // A HashMap of active websocket connections
     connections: SharedConnections,
+    // A HashMap of requests pending a response from a client
     pending_requests: PendingRequests,
 }
 
@@ -78,6 +79,7 @@ impl Server {
                     tracing::info!("New incoming client request - {:?}", addr);
 
                     let connections = self.connections.clone();
+                    let pending_requests = self.pending_requests.clone();
 
                     // our request handler service will upgrade the Websocket connection
                     // (spawning a new thread) or signal that the client should do so.
@@ -87,7 +89,7 @@ impl Server {
                         .serve_connection(
                             TokioIo::new(stream),
                             hyper::service::service_fn(move |req| {
-                                handle_request(req, connections.clone())
+                                handle_request(req, connections.clone(), pending_requests.clone())
                             }),
                         )
                         .with_upgrades();
@@ -119,6 +121,7 @@ impl Server {
 async fn handle_request(
     mut request: Request<hyper::body::Incoming>,
     connections: SharedConnections,
+    pending_requests: PendingRequests,
 ) -> Result<Response<Full<Bytes>>, Error> {
     tracing::Span::current().record(
         "client",
@@ -148,7 +151,9 @@ async fn handle_request(
                         );
 
                         tokio::spawn(async move {
-                            if let Err(err) = websocket_controller(websocket, connections).await {
+                            if let Err(err) =
+                                websocket_controller(websocket, connections, pending_requests).await
+                            {
                                 event!(
                                     Level::ERROR,
                                     "Failure during websocket connection: {:?}",
@@ -170,18 +175,21 @@ async fn handle_request(
                     }
                 }
             } else {
-                event!(
-                    Level::INFO,
-                    "Incoming HTTP request. Sending back 426 upgrade response"
-                );
-
                 let request_id = Uuid::new_v4();
-                let request_id_bytes = request_id.to_bytes_le();
 
-                let serialized = request
+                let serialized_request_id = request_id.to_bytes_le();
+                let serialized_request = request
                     .serialize()
                     .await
                     .expect("Failed to serialize request");
+
+                // Create a oneshot for this request and store it's transmitter. The websocket
+                // listener should pick up the response from a client and pass back the response.
+                let (tx, rx) = oneshot::channel();
+                {
+                    let mut pending_requests = pending_requests.lock().await;
+                    pending_requests.insert(request_id, tx);
+                }
 
                 let connections = connections.lock().await;
                 if connections.len() > 0 {
@@ -190,22 +198,47 @@ async fn handle_request(
 
                         let mut ws_sender = value.0.lock().await;
 
-                        ws_sender
-                            .send(Message::Binary(
-                                [&request_id_bytes, serialized.clone().as_slice()].concat(),
-                            ))
-                            .await
-                            .unwrap();
+                        let message = [
+                            &serialized_request_id,
+                            serialized_request.clone().as_slice(),
+                        ]
+                        .concat();
+                        ws_sender.send(Message::Binary(message)).await.unwrap();
                     }
                 }
 
-                // Inform the client we're expecting upgrade requests here
-                Ok(Response::builder()
-                    .status(426)
-                    .header("Connection", "upgrade")
-                    .header("Upgrade", "websocket")
-                    .body(Full::from("Upgrade required"))
-                    .unwrap_or(Response::new(Full::from("Unsupported request"))))
+                // Awaiting the response from the client.
+                match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    Ok(Ok(response)) => {
+                        // Forward the response back to the original HTTP requestor
+                        Ok(Response::new(response.into_body()))
+                    }
+                    Ok(Err(_)) => {
+                        event!(
+                            Level::ERROR,
+                            "Client disconnected while waiting for response"
+                        );
+                        {
+                            let mut pending_requests = pending_requests.lock().await;
+                            pending_requests.remove(&request_id);
+                        }
+                        Ok(Response::builder()
+                            .status(500)
+                            .body(Full::from("Internal server error"))
+                            .unwrap())
+                    }
+                    Err(_) => {
+                        event!(Level::ERROR, "Timed out waiting for client response");
+                        {
+                            let mut pending_requests = pending_requests.lock().await;
+                            pending_requests.remove(&request_id);
+                        }
+                        Ok(Response::builder()
+                            .status(504)
+                            .body(Full::from("Gateway timeout"))
+                            .unwrap())
+                    }
+                }
             }
         }
     }

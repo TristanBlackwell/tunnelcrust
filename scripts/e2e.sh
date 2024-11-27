@@ -46,7 +46,7 @@ sleep 2
 
 
 echo "Response: $response"
-if [[ "$response" == *"Upgrade required"* ]]; then
+if [[ "$response" == *"Back to you!"* ]]; then
   echo "Test passed: received expected response."
 else
   echo "Test failed: unexpected response."

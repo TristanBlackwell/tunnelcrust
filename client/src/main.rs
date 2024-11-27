@@ -109,13 +109,14 @@ async fn main() {
 
                         println!("Response status: {}", res.status());
 
-                        let serialized = res
+                        let serialized_request_id = request_parts.0.to_bytes_le();
+                        let serialized_request = res
                             .serialize()
                             .await
                             .expect("Failed to serialize response");
 
-                            let request_id_bytes = request_id.to_bytes_le();
-                            if let Err(e) = write.send(Message::Binary([&request_id_bytes, serialized.clone().as_slice()].concat())).await {
+                            let message = [&serialized_request_id, serialized_request.as_slice()].concat();
+                            if let Err(e) = write.send(Message::Binary(message)).await {
                                 eprintln!("Failed to send message to WebSocket: {}", e);
                                 break;
                             }
@@ -193,7 +194,7 @@ async fn process_bytes(bytes: Vec<u8>) -> (Uuid, Request<Full<Bytes>>) {
         .expect("Slice has wrong length!");
     let request_id = Uuid::from_bytes_le(array);
 
-    let request = hyper::Request::<Bytes>::deserialize(&bytes)
+    let request = hyper::Request::<Bytes>::deserialize(&bytes[16..])
         .await
         .expect("Failed to deserialize request");
 
