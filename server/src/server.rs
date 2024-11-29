@@ -20,7 +20,7 @@ use crate::websocket::websocket_controller;
 pub type SharedConnections = Arc<
     Mutex<
         HashMap<
-            Uuid,
+            String,
             (
                 Arc<Mutex<SplitSink<WebSocketStream<TokioIo<Upgraded>>, Message>>>,
                 Arc<Mutex<SplitStream<WebSocketStream<TokioIo<Upgraded>>>>>,
@@ -177,6 +177,15 @@ async fn handle_request(
             } else {
                 let request_id = Uuid::new_v4();
 
+                let host_header = match request.headers().get("host") {
+                    Some(value) => value.to_str().unwrap_or("unknown"),
+                    None => "unknown",
+                }
+                .to_string();
+
+                let subdomain = host_header.split('.').next().unwrap();
+                event!(Level::INFO, "Received request for subdomain: {}", subdomain);
+
                 let serialized_request_id = request_id.to_bytes_le();
                 let serialized_request = request
                     .serialize()
@@ -192,19 +201,29 @@ async fn handle_request(
                 }
 
                 let connections = connections.lock().await;
-                if connections.len() > 0 {
-                    for (key, value) in connections.iter() {
-                        event!(Level::INFO, "Forwarding HTTP request to {}", key);
+                if let Some((ws_sender, _)) = connections.get(subdomain) {
+                    event!(
+                        Level::INFO,
+                        "match subdomain against connected client: {}",
+                        subdomain
+                    );
 
-                        let mut ws_sender = value.0.lock().await;
+                    event!(Level::INFO, "Forwarding HTTP...");
 
-                        let message = [
-                            &serialized_request_id,
-                            serialized_request.clone().as_slice(),
-                        ]
-                        .concat();
-                        ws_sender.send(Message::Binary(message)).await.unwrap();
-                    }
+                    let mut ws_sender = ws_sender.lock().await;
+
+                    let message = [
+                        &serialized_request_id,
+                        serialized_request.clone().as_slice(),
+                    ]
+                    .concat();
+                    ws_sender.send(Message::Binary(message)).await.unwrap();
+                } else {
+                    event!(
+                        Level::WARN,
+                        "Unable to match subdomain {} against known clients",
+                        subdomain
+                    );
                 }
 
                 // Awaiting the response from the client.

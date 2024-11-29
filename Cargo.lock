@@ -1416,6 +1416,7 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "protocol",
+ "rand",
  "reqwest",
  "serde",
  "tokio",

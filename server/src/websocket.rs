@@ -5,16 +5,17 @@ use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
 use crate::{
+    domain::generate_random_subdomain,
     error::Error,
     server::{PendingRequests, SharedConnections},
 };
-use futures::stream::StreamExt;
+use futures::{stream::StreamExt, SinkExt};
 use hyper_tungstenite::{
     tungstenite::error::ProtocolError, tungstenite::Error::AlreadyClosed,
     tungstenite::Error::ConnectionClosed, tungstenite::Error::Protocol, tungstenite::Message,
     HyperWebsocket,
 };
-use tokio::sync::Mutex;
+use tokio::{spawn, sync::Mutex};
 
 use uuid::Uuid;
 
@@ -30,7 +31,8 @@ pub async fn websocket_controller(
         Ok(websocket) => {
             event!(Level::INFO, "Websocket connection established");
 
-            let client_id = Uuid::new_v4();
+            // TODO: ensure client subdomains don't conflict
+            let client_subdomain = generate_random_subdomain();
 
             let (ws_sender, ws_receiver) = websocket.split();
             let ws_sender = Arc::new(Mutex::new(ws_sender));
@@ -38,24 +40,34 @@ pub async fn websocket_controller(
 
             {
                 let mut connections = connections.lock().await;
-                connections.insert(client_id, (ws_sender.clone(), ws_receiver.clone()));
+                connections.insert(
+                    client_subdomain.clone(),
+                    (ws_sender.clone(), ws_receiver.clone()),
+                );
                 event!(
                     Level::INFO,
                     "Websocket connection attached to active connections: {}",
-                    client_id
+                    &client_subdomain
                 );
             }
 
-            // let ws_sender_clone = ws_sender.clone();
-            // spawn(async move {
-            //     sleep(Duration::from_secs(5)).await;
-            //     let mut locked_ws_sender = ws_sender_clone.lock().await;
-            //     if let Err(e) = locked_ws_sender.send(Message::text("Ping!")).await {
-            //         event!(Level::ERROR, "Failed to send 'ping': {}", e);
-            //     } else {
-            //         event!(Level::DEBUG, "'pinged' client: {}", client_id);
-            //     }
-            // });
+            let ws_sender_clone = ws_sender.clone();
+            let client_subdomain_copy = client_subdomain.clone();
+            spawn(async move {
+                let mut locked_ws_sender = ws_sender_clone.lock().await;
+                if let Err(e) = locked_ws_sender
+                    .send(Message::text(format!("Name:{}", client_subdomain_copy)))
+                    .await
+                {
+                    event!(Level::ERROR, "Failed to send client's name: {}", e);
+                } else {
+                    event!(
+                        Level::DEBUG,
+                        "client name has been sent: {}",
+                        client_subdomain_copy
+                    );
+                }
+            });
 
             let ws_receiver_clone = ws_receiver.clone();
             while let Some(ws_message) = ws_receiver_clone.lock().await.next().await {
@@ -132,11 +144,11 @@ pub async fn websocket_controller(
 
             {
                 let mut connections = connections.lock().await;
-                connections.remove(&client_id);
+                connections.remove(&client_subdomain);
                 event!(
                     Level::INFO,
                     "Websocket connection removed from active connections: {}",
-                    client_id
+                    &client_subdomain
                 )
             }
         }
