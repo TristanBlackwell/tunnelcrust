@@ -85,8 +85,7 @@ async fn main() {
     let (_, mut stdin_rx) = futures_channel::mpsc::unbounded::<Message>();
 
     // Establish the WebSocket connection to the proxy server.
-    let (ws_stream, _) = connect_async(server_url).await.expect("Failed to connect");
-
+    let (ws_stream, _) = connect_async(&server_url).await.expect("Failed to connect");
     println!("Tunnel connected");
 
     let (mut write, mut read) = ws_stream.split();
@@ -96,7 +95,19 @@ async fn main() {
             // Incoming message
             Some(message) = read.next() => {
                 match message {
-                    Ok(Message::Text(text)) => println!("Received text: {}", text),
+                    Ok(Message::Text(text)) => {
+                        if text.starts_with("subdomain:") {
+                            if let Some(subdomain) = text.strip_prefix("subdomain:") {
+                                let full_domain = format!("http://{}.{}", subdomain, &server_url.strip_prefix("ws://").expect("Failed to modify server URL"));
+                                println!();
+                                println!("Send requests to: {}", &full_domain);
+                                println!();
+
+                            }
+                        } else {
+                            println!("Received text message: {}", text);
+                        }
+                    },
                     Ok(Message::Binary(bytes)) => {
                         let request_parts = process_bytes(bytes).await;
 

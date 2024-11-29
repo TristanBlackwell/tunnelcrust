@@ -56,14 +56,17 @@ pub async fn websocket_controller(
             spawn(async move {
                 let mut locked_ws_sender = ws_sender_clone.lock().await;
                 if let Err(e) = locked_ws_sender
-                    .send(Message::text(format!("Name:{}", client_subdomain_copy)))
+                    .send(Message::text(format!(
+                        "subdomain:{}",
+                        client_subdomain_copy
+                    )))
                     .await
                 {
-                    event!(Level::ERROR, "Failed to send client's name: {}", e);
+                    event!(Level::ERROR, "Failed to send client's subdomain: {}", e);
                 } else {
                     event!(
                         Level::DEBUG,
-                        "client name has been sent: {}",
+                        "client subdomain has been sent: {}",
                         client_subdomain_copy
                     );
                 }
