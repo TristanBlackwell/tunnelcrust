@@ -30,13 +30,11 @@ pub async fn run_until_stopped(config: &Config, mut sender: SendRequest<Full<Byt
                 match message {
                     Ok(Message::Text(text)) => {
                         if text.starts_with("subdomain:") {
-                            if let Some(subdomain) = text.strip_prefix("subdomain:") {
-                                let full_domain = format!("http://{}.{}", subdomain, &config.server_url.strip_prefix("ws://").expect("Failed to modify server URL"));
-                                println!();
-                                println!("Send requests to: {}", &full_domain);
-                                println!();
-
-                            }
+                            let subdomain = text.replace("subdomain:", "");
+                            let full_domain = format!("http://{}.{}", subdomain, &config.server_url.replace("ws://", ""));
+                            println!();
+                            println!("Send requests to: {}", &full_domain);
+                            println!();
                         } else {
                             println!("Received text message: {}", text);
                         }

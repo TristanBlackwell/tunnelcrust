@@ -1,27 +1,28 @@
 use http_body_util::Full;
 use hyper::{body::Bytes, Response};
 use protocol::ResponseBytesBinaryProtocol;
-use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
 use crate::{
-    domain::generate_random_subdomain,
+    client::prepare_client_connection,
     error::Error,
     server::{PendingRequests, SharedConnections},
 };
-use futures::{stream::StreamExt, SinkExt};
+use futures::stream::StreamExt;
 use hyper_tungstenite::{
     tungstenite::error::ProtocolError, tungstenite::Error::AlreadyClosed,
     tungstenite::Error::ConnectionClosed, tungstenite::Error::Protocol, tungstenite::Message,
     HyperWebsocket,
 };
-use tokio::{spawn, sync::Mutex};
 
 use uuid::Uuid;
 
-/// Takes in a websocket connection and sets up contained sender and receiver streams.
-/// The client is stored in the servers `sharedConnections` map until disconnected.
-#[instrument(name = "websocket_controller", skip(websocket, connections))]
+/// Prepares a websocket connection as a connected client and processes
+/// any incoming messages
+#[instrument(
+    name = "websocket_controller",
+    skip(websocket, connections, pending_requests)
+)]
 pub async fn websocket_controller(
     websocket: HyperWebsocket,
     connections: SharedConnections,
@@ -31,46 +32,8 @@ pub async fn websocket_controller(
         Ok(websocket) => {
             event!(Level::INFO, "Websocket connection established");
 
-            // TODO: ensure client subdomains don't conflict
-            let client_subdomain = generate_random_subdomain();
-
-            let (ws_sender, ws_receiver) = websocket.split();
-            let ws_sender = Arc::new(Mutex::new(ws_sender));
-            let ws_receiver = Arc::new(Mutex::new(ws_receiver));
-
-            {
-                let mut connections = connections.lock().await;
-                connections.insert(
-                    client_subdomain.clone(),
-                    (ws_sender.clone(), ws_receiver.clone()),
-                );
-                event!(
-                    Level::INFO,
-                    "Websocket connection attached to active connections: {}",
-                    &client_subdomain
-                );
-            }
-
-            let ws_sender_clone = ws_sender.clone();
-            let client_subdomain_copy = client_subdomain.clone();
-            spawn(async move {
-                let mut locked_ws_sender = ws_sender_clone.lock().await;
-                if let Err(e) = locked_ws_sender
-                    .send(Message::text(format!(
-                        "subdomain:{}",
-                        client_subdomain_copy
-                    )))
-                    .await
-                {
-                    event!(Level::ERROR, "Failed to send client's subdomain: {}", e);
-                } else {
-                    event!(
-                        Level::DEBUG,
-                        "client subdomain has been sent: {}",
-                        client_subdomain_copy
-                    );
-                }
-            });
+            let (client_subdomain, _, ws_receiver) =
+                prepare_client_connection(websocket, &connections).await;
 
             let ws_receiver_clone = ws_receiver.clone();
             while let Some(ws_message) = ws_receiver_clone.lock().await.next().await {

@@ -23,7 +23,7 @@ pub async fn spawn_app() -> TestApplication {
     let server_clone = server.clone();
     // Spawn the server on a background task
     tokio::spawn(async move {
-        server_clone.run().await;
+        server_clone.run_until_stopped().await;
     });
 
     TestApplication {

@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let server = Server::build(configuration).await?;
 
-    server.run().await;
+    server.run_until_stopped().await;
 
     Ok(())
 }
